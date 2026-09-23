@@ -42,8 +42,8 @@ python3 daily_todo.py --html todo.html
 python3 daily_todo.py --html todo.html --commit
 ```
 
-**Dry-run by default.** Without `--commit` nothing is written to state, and no
-run ever sends anything to anyone — delivery is not built yet.
+**Dry-run by default.** Without `--commit` nothing is written to state. Nothing
+is sent anywhere unless `--slack-webhook` (or `$SLACK_WEBHOOK`) is set.
 
 ### Flags
 
@@ -54,6 +54,9 @@ run ever sends anything to anyone — delivery is not built yet.
 | `--out FILE` | — | Write the text version |
 | `--extra FILE` | — | JSON file of escalation items from Slack |
 | `--due-within N` | off | Only list items due within N working days (see 5) |
+| `--slack-webhook URL` | `$SLACK_WEBHOOK` | Post the text list to a Slack Incoming Webhook (unset = no post) |
+| `--snapshot DIR` | — | Also freeze today's list as `DIR/YYYY-MM-DD.json` (see 8.1) |
+| `--render-snapshot FILE` | — | Re-render an old snapshot (text to stdout, `--html` for HTML) and exit. No token needed |
 | `--state FILE` | `todo_state.jsonl` next to the script | Change where state lives |
 | `--no-review` | off | Skip the reviewer-fetch phase (faster, but `In review` loses its actor) |
 | `--today YYYY-MM-DD` | today | Simulate the run date, for testing |
@@ -62,14 +65,31 @@ run ever sends anything to anyone — delivery is not built yet.
 `--commit` is safe to run twice: the second run on the same day reports
 *"no new rows"* instead of duplicating.
 
-### Cron
+### Scheduled run — GitHub Actions
 
-```cron
-# 08:30 Mon-Fri
-30 8 * * 1-5 cd /path/to/scripts && \
-  GITHUB_TOKEN=ghp_xxx /usr/bin/python3 daily_todo.py \
-  --html /path/to/todo-$(date +\%F).html --commit >> todo.log 2>&1
-```
+`.github/workflows/daily-todo.yml` runs the list every weekday at **08:15
+Asia/Ho_Chi_Minh** (`15 1 * * 1-5` UTC), posts it to Slack, keeps `todo.html`
+as a workflow artifact for 30 days, and commits `todo_state.jsonl` plus the
+day's `snapshots/YYYY-MM-DD.json` back to the repo so carryover and history
+survive between runs. No machine of yours needs to be on.
+
+Two repository secrets (Settings → Secrets and variables → Actions):
+
+| Secret | Value |
+|---|---|
+| `AUTOBOOST_TOKEN` | A GitHub PAT with `read:project` + `repo` (section 1). The workflow's own `GITHUB_TOKEN` cannot read org projects. |
+| `SLACK_WEBHOOK` | The channel's Incoming Webhook URL. Never commit it. |
+
+Manual runs: *Actions → Daily TODO → Run workflow*. Both `commit` and `slack`
+default to **off** there, so a manual run is a preview — download the artifact
+to check the HTML. Tick them to make a manual run behave like the schedule.
+
+GitHub's cron can start several minutes late under load; if 08:15 sharp
+matters, set the cron a few minutes early.
+
+Slack rendering: the text list goes into code blocks, split into messages of
+at most ~3500 chars so nothing is truncated. `daily_todo.py --slack-webhook`
+does the same from any machine.
 
 ---
 
@@ -530,6 +550,23 @@ Four fields only. The principle: **store only what can't be re-read.**
 Worth committing to git for the history. It contains GitHub logins and nothing
 more sensitive than that.
 
+
+### 8.1. Daily snapshots
+
+`--snapshot DIR` writes the whole built list — every block, with title,
+status, reason, deadline, carry count — as `DIR/YYYY-MM-DD.json`. The state
+file (8) only records *who had which key*; the snapshot records *what the list
+said*. The scheduled workflow commits one per weekday into `snapshots/`.
+
+- A snapshot is **the list as posted at 08:15**, not the board's end-of-day
+  state. "What got done on day D" is the difference between D and D+1 — the
+  *Left the list* block already computes exactly that.
+- HTML is not stored: `--render-snapshot snapshots/2026-09-24.json --html
+  x.html` rebuilds it byte-for-byte, with no token and no network.
+- This is the file a Timesheet integration should read to answer "what was on
+  X's list on day D", so hours can be logged against a past day's items.
+- Size: ~10–20 KB per day; a year is under 5 MB.
+
 ---
 
 ## 9. Three design decisions to know before changing anything
@@ -662,8 +699,9 @@ option name, and the spacing after it is inconsistent).
 
 ## 12. Not built yet
 
-- **Slack DM delivery.** The list is written to files only. Worth watching the
-  HTML against real data for a few days before wiring delivery up.
+- **Slack DM delivery.** The list is posted to one channel as code blocks.
+  Per-person DMs, and a native Block Kit layout instead of a code block, are
+  not built.
 - **Reading Slack automatically** for escalation. Currently via `--extra`.
 - **Capturing the reason** when something is carried 3+ days. The system asks
   but has nowhere to record the answer. When built, the reason should go into

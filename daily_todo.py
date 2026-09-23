@@ -22,6 +22,7 @@ import argparse
 import json
 import os
 import sys
+import urllib.request
 from collections import Counter, defaultdict
 from datetime import date, timedelta
 
@@ -541,6 +542,76 @@ def render_html(d, today):
     return "\n".join(out)
 
 
+# ---------------------------------------------------------------- snapshot
+
+SNAPSHOT_LISTS = ("tasks", "unassigned", "leader_only", "pending",
+                  "deferred", "upcoming", "closed")
+
+
+def write_snapshot(d, today, dirpath):
+    """Freeze the built list as DIR/YYYY-MM-DD.json - data, not markup.
+
+    The HTML can always be re-rendered from this (see --render-snapshot); the
+    reverse is not true. This is also what a Timesheet integration should read
+    when it needs "what was on X's list on day D": the list as posted at
+    08:15, not the board's end-of-day state.
+    """
+    os.makedirs(dirpath, exist_ok=True)
+    path = os.path.join(dirpath, f"{today}.json")
+    payload = {"today": str(today), **d}
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=1, default=str)
+    return path
+
+
+def load_snapshot(path):
+    """Inverse of write_snapshot: dates come back as date objects so the
+    renderers' comparisons (sort_key, due_label) keep working."""
+    with open(path, encoding="utf-8") as f:
+        d = json.load(f)
+    today = ab.parse_date(d.pop("today"))
+    for name in SNAPSHOT_LISTS:
+        for t in d.get(name) or []:
+            if isinstance(t.get("due"), str):
+                t["due"] = ab.parse_date(t["due"])
+    return d, today
+
+
+# ---------------------------------------------------------------- slack
+
+SLACK_CHUNK = 3500   # Slack renders ~4000 chars per message reliably
+
+
+def post_slack(webhook, text, header):
+    """Post the text list to a Slack Incoming Webhook, as code blocks.
+
+    The text renderer's fixed-width layout only survives inside ``` so the
+    whole list goes in code blocks, split at line boundaries so no message
+    exceeds SLACK_CHUNK chars. The header goes above the first chunk only.
+    Any HTTP error is fatal: a missing morning post must fail the cron run
+    loudly rather than be silently swallowed.
+    """
+    chunks, cur = [], ""
+    for line in text.splitlines():
+        if cur and len(cur) + len(line) + 1 > SLACK_CHUNK:
+            chunks.append(cur)
+            cur = ""
+        cur += line + "\n"
+    if cur:
+        chunks.append(cur)
+    for n, chunk in enumerate(chunks):
+        body = f"{header}\n```{chunk}```" if n == 0 else f"```{chunk}```"
+        if len(chunks) > 1:
+            body += f"\n_({n + 1}/{len(chunks)})_"
+        req = urllib.request.Request(
+            webhook, data=json.dumps({"text": body}).encode("utf-8"),
+            headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            if r.status != 200:
+                sys.exit(f"Slack webhook returned {r.status}")
+    return len(chunks)
+
+
 # ---------------------------------------------------------------- main
 
 def main():
@@ -556,10 +627,30 @@ def main():
     ap.add_argument("--due-within", type=int, metavar="N",
                     help="only list items with Dev End Date within N working "
                          "days (opt-in; undated items are always kept)")
+    ap.add_argument("--snapshot", metavar="DIR",
+                    help="also freeze today's list as DIR/YYYY-MM-DD.json")
+    ap.add_argument("--render-snapshot", metavar="FILE",
+                    help="re-render an old snapshot (text to stdout, --html "
+                         "for HTML) and exit; needs no token and no network")
+    ap.add_argument("--slack-webhook", metavar="URL",
+                    default=os.environ.get("SLACK_WEBHOOK"),
+                    help="post the text list to this Slack Incoming Webhook "
+                         "(default: $SLACK_WEBHOOK; unset = do not post)")
     ap.add_argument("--no-review", action="store_true",
                     help="skip phase 2 (faster, but In review loses its actor)")
     ap.add_argument("--today", help="simulate the run date (YYYY-MM-DD)")
     a = ap.parse_args()
+
+    if a.render_snapshot:
+        d, today = load_snapshot(a.render_snapshot)
+        txt = render_text(d, today)
+        print(txt)
+        if a.out:
+            open(a.out, "w", encoding="utf-8").write(txt)
+        if a.html:
+            open(a.html, "w", encoding="utf-8").write(render_html(d, today))
+            print(f"-> {a.html}", file=sys.stderr)
+        return
 
     token = os.environ.get("GITHUB_TOKEN")
     if not token:
@@ -600,6 +691,13 @@ def main():
     if a.html:
         open(a.html, "w", encoding="utf-8").write(render_html(d, today))
         print(f"-> {a.html}", file=sys.stderr)
+    if a.snapshot:
+        print(f"-> {write_snapshot(d, today, a.snapshot)}", file=sys.stderr)
+    if a.slack_webhook:
+        hdr = (f":clipboard: *Daily TODO — {today}*  ·  sprint {d['sprint']}"
+               f"  ·  {d['days_left']} working days left")
+        n = post_slack(a.slack_webhook, txt, hdr)
+        print(f"-> Slack ({plural(n, 'message')})", file=sys.stderr)
 
     if a.commit:
         already = {(r["date"], str(r.get("key")), r.get("person")) for r in rows}

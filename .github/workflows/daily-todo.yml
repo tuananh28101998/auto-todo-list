@@ -1,0 +1,66 @@
+name: Daily TODO
+
+on:
+  schedule:
+    # 08:15 Asia/Ho_Chi_Minh (UTC+7) = 01:15 UTC, Mon-Fri.
+    # GitHub cron is UTC only and may start a few minutes late under load.
+    - cron: "15 1 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: "Write today's list to state (off = preview only)"
+        type: boolean
+        default: false
+      slack:
+        description: "Post to Slack"
+        type: boolean
+        default: false
+
+concurrency:
+  group: daily-todo
+  cancel-in-progress: false
+
+permissions:
+  contents: write   # to commit todo_state.jsonl and snapshots/ back
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Unit tests
+        run: python3 test_start_slip.py
+
+      - name: Generate today's list
+        env:
+          GITHUB_TOKEN: ${{ secrets.AUTOBOOST_TOKEN }}
+          SLACK_WEBHOOK: ${{ (github.event_name == 'schedule' || inputs.slack) && secrets.SLACK_WEBHOOK || '' }}
+          COMMIT: ${{ (github.event_name == 'schedule' || inputs.commit) && '--commit' || '' }}
+        run: |
+          python3 daily_todo.py --html todo.html --out todo.txt $COMMIT \
+            ${COMMIT:+--snapshot snapshots}
+
+      - name: Keep the HTML for 30 days
+        uses: actions/upload-artifact@v4
+        with:
+          name: todo-${{ github.run_id }}
+          path: |
+            todo.html
+            todo.txt
+          retention-days: 30
+
+      - name: Commit state + snapshot
+        if: github.event_name == 'schedule' || inputs.commit
+        run: |
+          git config user.name  "daily-todo[bot]"
+          git config user.email "daily-todo@users.noreply.github.com"
+          git add todo_state.jsonl snapshots/
+          git diff --cached --quiet && echo "state unchanged" && exit 0
+          git commit -m "state: $(date -u +%F)"
+          git pull --rebase origin ${{ github.ref_name }}
+          git push
