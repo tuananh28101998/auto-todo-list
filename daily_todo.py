@@ -22,6 +22,7 @@ import argparse
 import json
 import os
 import sys
+import urllib.parse
 import urllib.request
 from collections import Counter, defaultdict
 from datetime import date, timedelta
@@ -582,14 +583,12 @@ def load_snapshot(path):
 SLACK_CHUNK = 3500   # Slack renders ~4000 chars per message reliably
 
 
-def post_slack(webhook, text, header):
-    """Post the text list to a Slack Incoming Webhook, as code blocks.
+def slack_chunks(text, header):
+    """Split the fixed-width list into code-block messages <= SLACK_CHUNK chars.
 
-    The text renderer's fixed-width layout only survives inside ``` so the
-    whole list goes in code blocks, split at line boundaries so no message
-    exceeds SLACK_CHUNK chars. The header goes above the first chunk only.
-    Any HTTP error is fatal: a missing morning post must fail the cron run
-    loudly rather than be silently swallowed.
+    The text renderer's column layout only survives inside ```, so the whole
+    list goes in code blocks, split at line boundaries. The header goes above
+    the first chunk only; multi-part posts are numbered.
     """
     chunks, cur = [], ""
     for line in text.splitlines():
@@ -599,17 +598,78 @@ def post_slack(webhook, text, header):
         cur += line + "\n"
     if cur:
         chunks.append(cur)
+    out = []
     for n, chunk in enumerate(chunks):
         body = f"{header}\n```{chunk}```" if n == 0 else f"```{chunk}```"
         if len(chunks) > 1:
             body += f"\n_({n + 1}/{len(chunks)})_"
-        req = urllib.request.Request(
-            webhook, data=json.dumps({"text": body}).encode("utf-8"),
-            headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=30) as r:
-            if r.status != 200:
-                sys.exit(f"Slack webhook returned {r.status}")
-    return len(chunks)
+        out.append(body)
+    return out
+
+
+def _http(url, data, headers, timeout=30):
+    req = urllib.request.Request(url, data=data, headers=headers)
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.status, r.read()
+
+
+def post_slack(webhook, text, header):
+    """Incoming Webhook: text only. Fatal on any HTTP error - a missing
+    morning post must fail the cron run loudly, not be swallowed."""
+    msgs = slack_chunks(text, header)
+    for body in msgs:
+        status, _ = _http(webhook, json.dumps({"text": body}).encode("utf-8"),
+                          {"Content-Type": "application/json"})
+        if status != 200:
+            sys.exit(f"Slack webhook returned {status}")
+    return len(msgs)
+
+
+def _slack_api(token, method, payload, form=False):
+    """Call a Slack Web API method. Slack returns HTTP 200 even on failure
+    and puts the verdict in {"ok": false, "error": ...} - check that."""
+    if form:
+        data = urllib.parse.urlencode(payload).encode("utf-8")
+        ctype = "application/x-www-form-urlencoded"
+    else:
+        data = json.dumps(payload).encode("utf-8")
+        ctype = "application/json; charset=utf-8"
+    _, body = _http(f"https://slack.com/api/{method}", data,
+                    {"Authorization": f"Bearer {token}", "Content-Type": ctype})
+    res = json.loads(body)
+    if not res.get("ok"):
+        sys.exit(f"Slack {method} failed: {res.get('error')}"
+                 + (f" ({res.get('needed')})" if res.get("needed") else ""))
+    return res
+
+
+def post_slack_bot(token, channel, text, header, html_path=None, today=None):
+    """Bot token: post the text list, then upload the HTML file below it.
+
+    Needs scopes chat:write + files:write, and the bot must be a member of
+    the channel (/invite @app). The HTML upload uses the files.*External
+    pair, which is the only upload path Slack still supports.
+    """
+    msgs = slack_chunks(text, header)
+    for body in msgs:
+        _slack_api(token, "chat.postMessage",
+                   {"channel": channel, "text": body, "unfurl_links": False})
+    if html_path:
+        data = open(html_path, "rb").read()
+        fname = f"todo-{today}.html" if today else os.path.basename(html_path)
+        up = _slack_api(token, "files.getUploadURLExternal",
+                        {"filename": fname, "length": len(data)}, form=True)
+        status, _ = _http(up["upload_url"], data,
+                          {"Content-Type": "application/octet-stream"})
+        if status != 200:
+            sys.exit(f"Slack file upload returned {status}")
+        _slack_api(token, "files.", {
+            "files": [{"id": up["file_id"], "title": f"TODO {today or ''}".strip()}],
+            "channel_id": channel,
+            "initial_comment": ":page_facing_up: Same list as HTML - open it "
+                               "for the grouped view.",
+        })
+    return len(msgs) + (1 if html_path else 0)
 
 
 # ---------------------------------------------------------------- main
@@ -632,10 +692,17 @@ def main():
     ap.add_argument("--render-snapshot", metavar="FILE",
                     help="re-render an old snapshot (text to stdout, --html "
                          "for HTML) and exit; needs no token and no network")
+    ap.add_argument("--slack-bot-token", metavar="xoxb-...",
+                    default=os.environ.get("SLACK_BOT_TOKEN"),
+                    help="post via a Slack bot: text list + the --html file "
+                         "(default: $SLACK_BOT_TOKEN; needs --slack-channel)")
+    ap.add_argument("--slack-channel", metavar="CID",
+                    default=os.environ.get("SLACK_CHANNEL"),
+                    help="channel ID for --slack-bot-token (default: $SLACK_CHANNEL)")
     ap.add_argument("--slack-webhook", metavar="URL",
                     default=os.environ.get("SLACK_WEBHOOK"),
-                    help="post the text list to this Slack Incoming Webhook "
-                         "(default: $SLACK_WEBHOOK; unset = do not post)")
+                    help="fallback: post the text list only, to an Incoming "
+                         "Webhook (default: $SLACK_WEBHOOK; unset = no post)")
     ap.add_argument("--no-review", action="store_true",
                     help="skip phase 2 (faster, but In review loses its actor)")
     ap.add_argument("--today", help="simulate the run date (YYYY-MM-DD)")
@@ -693,11 +760,17 @@ def main():
         print(f"-> {a.html}", file=sys.stderr)
     if a.snapshot:
         print(f"-> {write_snapshot(d, today, a.snapshot)}", file=sys.stderr)
-    if a.slack_webhook:
-        hdr = (f":clipboard: *Daily TODO — {today}*  ·  sprint {d['sprint']}"
-               f"  ·  {d['days_left']} working days left")
+    hdr = (f":clipboard: *Daily TODO — {today}*  ·  sprint {d['sprint']}"
+           f"  ·  {d['days_left']} working days left")
+    if a.slack_bot_token:
+        if not a.slack_channel:
+            sys.exit("--slack-bot-token needs --slack-channel (or $SLACK_CHANNEL)")
+        n = post_slack_bot(a.slack_bot_token, a.slack_channel, txt, hdr,
+                           html_path=a.html, today=today)
+        print(f"-> Slack bot ({plural(n, 'message')})", file=sys.stderr)
+    elif a.slack_webhook:
         n = post_slack(a.slack_webhook, txt, hdr)
-        print(f"-> Slack ({plural(n, 'message')})", file=sys.stderr)
+        print(f"-> Slack webhook ({plural(n, 'message')})", file=sys.stderr)
 
     if a.commit:
         already = {(r["date"], str(r.get("key")), r.get("person")) for r in rows}

@@ -39,7 +39,8 @@ jobs:
       - name: Generate today's list
         env:
           GITHUB_TOKEN: ${{ secrets.AUTOBOOST_TOKEN }}
-          SLACK_WEBHOOK: ${{ (github.event_name == 'schedule' || inputs.slack) && secrets.SLACK_WEBHOOK || '' }}
+          SLACK_BOT_TOKEN: ${{ (github.event_name == 'schedule' || inputs.slack) && secrets.SLACK_BOT_TOKEN || '' }}
+          SLACK_CHANNEL: C0C4Q7U6R6U
           COMMIT: ${{ (github.event_name == 'schedule' || inputs.commit) && '--commit' || '' }}
         run: |
           python3 daily_todo.py --html todo.html --out todo.txt $COMMIT \

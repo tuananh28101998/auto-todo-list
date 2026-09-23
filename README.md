@@ -43,7 +43,7 @@ python3 daily_todo.py --html todo.html --commit
 ```
 
 **Dry-run by default.** Without `--commit` nothing is written to state. Nothing
-is sent anywhere unless `--slack-webhook` (or `$SLACK_WEBHOOK`) is set.
+is sent anywhere unless a Slack bot token or webhook is set.
 
 ### Flags
 
@@ -54,7 +54,9 @@ is sent anywhere unless `--slack-webhook` (or `$SLACK_WEBHOOK`) is set.
 | `--out FILE` | — | Write the text version |
 | `--extra FILE` | — | JSON file of escalation items from Slack |
 | `--due-within N` | off | Only list items due within N working days (see 5) |
-| `--slack-webhook URL` | `$SLACK_WEBHOOK` | Post the text list to a Slack Incoming Webhook (unset = no post) |
+| `--slack-bot-token T` | `$SLACK_BOT_TOKEN` | Post via a Slack bot: text list + the `--html` file. Needs `--slack-channel` |
+| `--slack-channel CID` | `$SLACK_CHANNEL` | Channel ID for the bot post |
+| `--slack-webhook URL` | `$SLACK_WEBHOOK` | Fallback: text list only, to an Incoming Webhook. Ignored when a bot token is set |
 | `--snapshot DIR` | — | Also freeze today's list as `DIR/YYYY-MM-DD.json` (see 8.1) |
 | `--render-snapshot FILE` | — | Re-render an old snapshot (text to stdout, `--html` for HTML) and exit. No token needed |
 | `--state FILE` | `todo_state.jsonl` next to the script | Change where state lives |
@@ -78,7 +80,9 @@ Two repository secrets (Settings → Secrets and variables → Actions):
 | Secret | Value |
 |---|---|
 | `AUTOBOOST_TOKEN` | A GitHub PAT with `read:project` + `repo` (section 1). The workflow's own `GITHUB_TOKEN` cannot read org projects. |
-| `SLACK_WEBHOOK` | The channel's Incoming Webhook URL. Never commit it. |
+| `SLACK_BOT_TOKEN` | Bot token (`xoxb-…`) of a Slack app with scopes `chat:write` + `files:write`. The bot must be invited to the channel (`/invite @app`). Never commit it. |
+
+The channel ID is not a secret; it is set as `SLACK_CHANNEL` in the workflow.
 
 Manual runs: *Actions → Daily TODO → Run workflow*. Both `commit` and `slack`
 default to **off** there, so a manual run is a preview — download the artifact
@@ -88,8 +92,10 @@ GitHub's cron can start several minutes late under load; if 08:15 sharp
 matters, set the cron a few minutes early.
 
 Slack rendering: the text list goes into code blocks, split into messages of
-at most ~3500 chars so nothing is truncated. `daily_todo.py --slack-webhook`
-does the same from any machine.
+at most ~3500 chars so nothing is truncated, followed by `todo.html` uploaded
+as a file — click it and Slack renders the grouped view. Without `--html`
+only the text is posted. `--slack-webhook` is the text-only fallback for a
+channel that has no bot.
 
 ---
 
