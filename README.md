@@ -54,7 +54,7 @@ is sent anywhere unless a Slack bot token or webhook is set.
 | `--out FILE` | — | Write the text version |
 | `--extra FILE` | — | JSON file of escalation items from Slack |
 | `--due-within N` | off | Only list items due within N working days (see 5) |
-| `--slack-bot-token T` | `$SLACK_BOT_TOKEN` | Post via a Slack bot: text list + the `--html` file. Needs `--slack-channel` |
+| `--slack-bot-token T` | `$SLACK_BOT_TOKEN` | Post the `--html` file to Slack via a bot (text list only if no `--html`). Needs `--slack-channel` |
 | `--slack-channel CID` | `$SLACK_CHANNEL` | Channel ID for the bot post |
 | `--slack-webhook URL` | `$SLACK_WEBHOOK` | Fallback: text list only, to an Incoming Webhook. Ignored when a bot token is set |
 | `--snapshot DIR` | — | Also freeze today's list as `DIR/YYYY-MM-DD.json` (see 8.1) |
@@ -91,11 +91,11 @@ to check the HTML. Tick them to make a manual run behave like the schedule.
 GitHub's cron can start several minutes late under load; if 08:15 sharp
 matters, set the cron a few minutes early.
 
-Slack rendering: the text list goes into code blocks, split into messages of
-at most ~3500 chars so nothing is truncated, followed by `todo.html` uploaded
-as a file — click it and Slack renders the grouped view. Without `--html`
-only the text is posted. `--slack-webhook` is the text-only fallback for a
-channel that has no bot.
+Slack rendering: with a bot token the channel gets **one message per day** —
+a header line, the `Total:` summary line, and `todo-YYYY-MM-DD.html` attached.
+Click the file and Slack renders the grouped HTML view. The fixed-width text
+list is not posted (it is kept as the workflow artifact and, via
+`--slack-webhook`, as the text-only fallback for a channel with no bot).
 
 ---
 

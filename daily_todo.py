@@ -644,32 +644,39 @@ def _slack_api(token, method, payload, form=False):
 
 
 def post_slack_bot(token, channel, text, header, html_path=None, today=None):
-    """Bot token: post the text list, then upload the HTML file below it.
+    """Bot token: upload the HTML list as a file, with a one-line summary.
+
+    Only the file is posted - the fixed-width text list is not, so the
+    channel gets one message per day: header + summary line + todo-DATE.html.
+    Clicking the file renders the grouped HTML view inside Slack. Without
+    --html there is no file to send, so the text list is posted instead.
 
     Needs scopes chat:write + files:write, and the bot must be a member of
-    the channel (/invite @app). The HTML upload uses the files.*External
-    pair, which is the only upload path Slack still supports.
+    the channel (/invite @app). The upload uses the files.*External pair,
+    which is the only upload path Slack still supports.
     """
-    msgs = slack_chunks(text, header)
-    for body in msgs:
-        _slack_api(token, "chat.postMessage",
-                   {"channel": channel, "text": body, "unfurl_links": False})
-    if html_path:
-        data = open(html_path, "rb").read()
-        fname = f"todo-{today}.html" if today else os.path.basename(html_path)
-        up = _slack_api(token, "files.getUploadURLExternal",
-                        {"filename": fname, "length": len(data)}, form=True)
-        status, _ = _http(up["upload_url"], data,
-                          {"Content-Type": "application/octet-stream"})
-        if status != 200:
-            sys.exit(f"Slack file upload returned {status}")
-        _slack_api(token, "files.completeUploadExternal", {
-            "files": [{"id": up["file_id"], "title": f"TODO {today or ''}".strip()}],
-            "channel_id": channel,
-            "initial_comment": ":page_facing_up: Same list as HTML - open it "
-                               "for the grouped view.",
-        })
-    return len(msgs) + (1 if html_path else 0)
+    if not html_path:
+        for body in slack_chunks(text, header):
+            _slack_api(token, "chat.postMessage",
+                       {"channel": channel, "text": body, "unfurl_links": False})
+        return 1
+    # The renderer's closing "Total: ..." line is the summary worth showing.
+    total = next((ln for ln in reversed(text.splitlines())
+                  if ln.startswith("Total:")), "")
+    data = open(html_path, "rb").read()
+    fname = f"todo-{today}.html" if today else os.path.basename(html_path)
+    up = _slack_api(token, "files.getUploadURLExternal",
+                    {"filename": fname, "length": len(data)}, form=True)
+    status, _ = _http(up["upload_url"], data,
+                      {"Content-Type": "application/octet-stream"})
+    if status != 200:
+        sys.exit(f"Slack file upload returned {status}")
+    _slack_api(token, "files.completeUploadExternal", {
+        "files": [{"id": up["file_id"], "title": f"TODO {today or ''}".strip()}],
+        "channel_id": channel,
+        "initial_comment": f"{header}\n{total}".rstrip(),
+    })
+    return 1
 
 
 # ---------------------------------------------------------------- main
@@ -765,9 +772,10 @@ def main():
     if a.slack_bot_token:
         if not a.slack_channel:
             sys.exit("--slack-bot-token needs --slack-channel (or $SLACK_CHANNEL)")
-        n = post_slack_bot(a.slack_bot_token, a.slack_channel, txt, hdr,
-                           html_path=a.html, today=today)
-        print(f"-> Slack bot ({plural(n, 'message')})", file=sys.stderr)
+        post_slack_bot(a.slack_bot_token, a.slack_channel, txt, hdr,
+                       html_path=a.html, today=today)
+        print("-> Slack bot (" + ("HTML file" if a.html else "text") + ")",
+              file=sys.stderr)
     elif a.slack_webhook:
         n = post_slack(a.slack_webhook, txt, hdr)
         print(f"-> Slack webhook ({plural(n, 'message')})", file=sys.stderr)
