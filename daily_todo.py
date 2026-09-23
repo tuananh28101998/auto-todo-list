@@ -663,7 +663,7 @@ def post_slack_bot(token, channel, text, header, html_path=None, today=None):
                           {"Content-Type": "application/octet-stream"})
         if status != 200:
             sys.exit(f"Slack file upload returned {status}")
-        _slack_api(token, "files.", {
+        _slack_api(token, "files.completeUploadExternal", {
             "files": [{"id": up["file_id"], "title": f"TODO {today or ''}".strip()}],
             "channel_id": channel,
             "initial_comment": ":page_facing_up: Same list as HTML - open it "
@@ -761,7 +761,7 @@ def main():
     if a.snapshot:
         print(f"-> {write_snapshot(d, today, a.snapshot)}", file=sys.stderr)
     hdr = (f":clipboard: *Daily TODO — {today}*  ·  sprint {d['sprint']}"
-           f"  ·  {d['days_left']} working days left")
+           f"  ·  {plural(d['days_left'], 'working day')} left")
     if a.slack_bot_token:
         if not a.slack_channel:
             sys.exit("--slack-bot-token needs --slack-channel (or $SLACK_CHANNEL)")
